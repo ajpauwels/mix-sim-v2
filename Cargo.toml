@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+serde = "1.0.219"
+# Hard version requirement or SerializableModel doesn't work
+serde_yaml = "=0.8.0"
+sim = "0.13.1"
+sim_derive = "0.13.0"
