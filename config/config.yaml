@@ -1,0 +1,28 @@
+seed: 0
+topology:
+  use_broadcast_server_output: false
+simulation:
+  duration: 48h
+  users:
+    count: 2
+    user_directory_size: 1
+    mix_directory_size: 2
+    chain_length: 1
+    # A value of 0 on lambda_u or lambda_p means no user messages will be sent
+    lambda_u: 0.002
+    lambda_p: 0.004
+    # A value of 0 on lambda_l means no loop messages will be sent
+    lambda_l: 0.0008
+    # A value of 0 on lambda_d means no drop messages will be sent
+    lambda_d: 0.0008
+    # A value of 0 on lambda_e means mix directory is never refreshed
+    lambda_e: 0.003
+    # A value of 0 on lambda_mu means messages are immediately forwarded on receipt
+    lambda_mu: 0.1
+metrics:
+  poll_interval: 300s
+  output_path: ./metrics.out
+
+#sum(avg_over_time(rate(messages_initiated_total{from="00138adb-7ad0-46c7-8856-e2ffd2783a8c"}[1h])[3h:30m]))
+
+#sum(avg_over_time(increase(messages_initiated_total{from="b2f7f581-d6de-4c06-a822-fd6e7e8265fb"}[10m])[1h:10m]))
