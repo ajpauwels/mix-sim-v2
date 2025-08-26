@@ -12,9 +12,16 @@ use prometheus_client::{
         text::{encode_eof, encode_registry_with_ts},
         EncodeLabelSet, EncodeLabelValue,
     },
-    metrics::{counter::Counter, family::Family, gauge::Gauge},
+    metrics::{
+        counter::Counter,
+        family::{Family, MetricConstructor},
+        gauge::Gauge,
+        histogram::Histogram,
+    },
     registry::Registry,
 };
+
+use crate::message::MessageBody;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct NoLabels {}
@@ -25,13 +32,20 @@ pub struct SimulationLambdaLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SimulationExpectedMessageLatencyLabels {
+    pub quantile: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct MessageInitiatedLabels {
     pub from: String,
     pub r#type: MessageBodyType,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct MessageForwardedLabels {}
+pub struct MessageForwardedLabels {
+    pub r#type: MessageBodyType,
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct MessageTerminatedLabels {
@@ -39,36 +53,93 @@ pub struct MessageTerminatedLabels {
     pub r#type: MessageBodyType,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MessageDroppedLabels {
+    pub r#type: MessageBodyType,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MessageLatencyLabels {
+    pub r#type: MessageBodyType,
+}
+
+#[derive(Clone)]
+pub struct MessageLatencyHistogramBuilder {
+    quantiles: Vec<f64>,
+}
+
+impl MetricConstructor<Histogram> for MessageLatencyHistogramBuilder {
+    fn new_metric(&self) -> Histogram {
+        Histogram::new(self.quantiles.clone())
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum MessageBodyType {
-    String,
-    Loop,
     Drop,
+    Loop,
+    String,
     EntryRequest,
     EntryResponse,
+}
+
+impl From<&MessageBody> for MessageBodyType {
+    fn from(body: &MessageBody) -> Self {
+        match body {
+            MessageBody::Drop => MessageBodyType::Drop,
+            MessageBody::Loop => MessageBodyType::Loop,
+            MessageBody::String(_) => MessageBodyType::String,
+            MessageBody::EntryRequest { .. } => MessageBodyType::EntryRequest,
+            MessageBody::EntryResponse { .. } => MessageBodyType::EntryResponse,
+        }
+    }
 }
 
 pub struct MetricFamilies {
     pub messages_initiated: Family<MessageInitiatedLabels, Counter>,
     pub messages_forwarded: Family<MessageForwardedLabels, Counter>,
     pub messages_terminated: Family<MessageTerminatedLabels, Counter>,
+    pub messages_dropped: Family<MessageDroppedLabels, Counter>,
+    pub message_latency: Family<MessageLatencyLabels, Histogram, MessageLatencyHistogramBuilder>,
     pub simulation_lambdas: Family<SimulationLambdaLabels, Gauge<f64, AtomicU64>>,
-    pub simulation_time: Family<NoLabels, Gauge>,
-    pub simulation_user_count: Family<NoLabels, Gauge>,
+    pub simulation_time: Family<NoLabels, Gauge<u64, AtomicU64>>,
+    pub simulation_user_count: Family<NoLabels, Gauge<u64, AtomicU64>>,
+    pub simulation_user_directory_size: Family<NoLabels, Gauge<u64, AtomicU64>>,
+    pub simulation_mix_directory_size: Family<NoLabels, Gauge<u64, AtomicU64>>,
+    pub simulation_chain_length: Family<NoLabels, Gauge<u64, AtomicU64>>,
+    pub simulation_user_availability: Family<NoLabels, Gauge<f64, AtomicU64>>,
+    pub simulation_expected_message_latency:
+        Family<SimulationExpectedMessageLatencyLabels, Gauge<f64, AtomicU64>>,
 }
 
-// pub fn setup() -> (MetricFamilies, JoinHandle<()>) {
-pub fn setup() -> (Registry, MetricFamilies) {
+pub fn setup(quantiles: Vec<(f64, f64)>) -> (Registry, MetricFamilies) {
     let mut registry = <Registry>::default();
 
-    let mf = MetricFamilies {
-        messages_initiated: Family::<MessageInitiatedLabels, Counter>::default(),
-        messages_forwarded: Family::<MessageForwardedLabels, Counter>::default(),
-        messages_terminated: Family::<MessageTerminatedLabels, Counter>::default(),
-        simulation_lambdas: Family::<SimulationLambdaLabels, Gauge<f64, AtomicU64>>::default(),
-        simulation_time: Family::<NoLabels, Gauge>::default(),
-        simulation_user_count: Family::<NoLabels, Gauge>::default(),
-    };
+    let mf =
+        MetricFamilies {
+            messages_initiated: Family::<MessageInitiatedLabels, Counter>::default(),
+            messages_forwarded: Family::<MessageForwardedLabels, Counter>::default(),
+            messages_terminated: Family::<MessageTerminatedLabels, Counter>::default(),
+            messages_dropped: Family::<MessageDroppedLabels, Counter>::default(),
+            message_latency: Family::<
+                MessageLatencyLabels,
+                Histogram,
+                MessageLatencyHistogramBuilder,
+            >::new_with_constructor(MessageLatencyHistogramBuilder {
+                quantiles: quantiles.into_iter().map(|(_, v)| v).collect(),
+            }),
+            simulation_lambdas: Family::<SimulationLambdaLabels, Gauge<f64, AtomicU64>>::default(),
+            simulation_time: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+            simulation_user_count: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+            simulation_user_directory_size: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+            simulation_mix_directory_size: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+            simulation_chain_length: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+            simulation_user_availability: Family::<NoLabels, Gauge<f64, AtomicU64>>::default(),
+            simulation_expected_message_latency: Family::<
+                SimulationExpectedMessageLatencyLabels,
+                Gauge<f64, AtomicU64>,
+            >::default(),
+        };
 
     registry.register(
         "messages_initiated",
@@ -86,6 +157,16 @@ pub fn setup() -> (Registry, MetricFamilies) {
         mf.messages_terminated.clone(),
     );
     registry.register(
+        "messages_dropped",
+        "Number of messages dropped during forwarding",
+        mf.messages_dropped.clone(),
+    );
+    registry.register(
+        "message_latency",
+        "Number of seconds it took for an initiated message to be terminated",
+        mf.message_latency.clone(),
+    );
+    registry.register(
         "simulation_lambdas",
         "Poisson distribution parameters",
         mf.simulation_lambdas.clone(),
@@ -99,6 +180,31 @@ pub fn setup() -> (Registry, MetricFamilies) {
         "simulation_user_count",
         "Number of users simulated",
         mf.simulation_user_count.clone(),
+    );
+    registry.register(
+        "simulation_user_directory_size",
+        "Size of a user's user directory",
+        mf.simulation_user_directory_size.clone(),
+    );
+    registry.register(
+        "simulation_mix_directory_size",
+        "Size of a user's mix directory",
+        mf.simulation_mix_directory_size.clone(),
+    );
+    registry.register(
+        "simulation_chain_length",
+        "Number of mix hops in a message path",
+        mf.simulation_chain_length.clone(),
+    );
+    registry.register(
+        "simulation_user_availability",
+        "Percent availability of simulation users",
+        mf.simulation_user_availability.clone(),
+    );
+    registry.register(
+        "simulation_expected_message_latency",
+        "Expected pX latencies for messages based on Poisson distribution parameters",
+        mf.simulation_expected_message_latency.clone(),
     );
 
     (registry, mf)

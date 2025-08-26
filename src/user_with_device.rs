@@ -22,6 +22,7 @@ pub struct ProtoUserWithDevice<'a> {
     pub root_req: Requestor<(), RootHash<Sha256>>,
     pub entries_req: Requestor<(RootHash<Sha256>, Vec<usize>), Vec<DirectoryEntry>>,
     name: String,
+    availability: Option<f64>,
     lambda_u: Option<f64>,
     lambda_p: Option<f64>,
     lambda_l: Option<f64>,
@@ -43,6 +44,7 @@ impl<'a> ProtoUserWithDevice<'a> {
             root_req: Default::default(),
             entries_req: Default::default(),
             name: name.to_owned(),
+            availability: None,
             lambda_u: None,
             lambda_p: None,
             lambda_l: None,
@@ -55,6 +57,11 @@ impl<'a> ProtoUserWithDevice<'a> {
             rng: None,
             metrics: mf,
         }
+    }
+
+    pub fn availability(mut self, availability: f64) -> Self {
+        self.availability = Some(availability);
+        self
     }
 
     pub fn lambda_u(mut self, lambda_u: f64) -> Self {
@@ -141,6 +148,7 @@ impl<'a> ProtoModel for ProtoUserWithDevice<'a> {
 
         // Create the user device
         let mut device = ProtoUserDevice::new(&self.name, self.metrics)
+            .availability(self.availability.unwrap_or(1.0))
             .lambda_p(self.lambda_p.unwrap_or(0.0))
             .lambda_l(self.lambda_l.unwrap_or(0.0))
             .lambda_d(self.lambda_d.unwrap_or(0.0))

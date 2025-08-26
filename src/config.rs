@@ -29,6 +29,8 @@ pub struct Users {
     #[serde(default)]
     pub chain_length: usize,
     #[serde(default)]
+    pub availability: f64,
+    #[serde(default)]
     pub lambda_u: f64,
     #[serde(default)]
     pub lambda_p: f64,

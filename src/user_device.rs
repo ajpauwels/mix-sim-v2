@@ -10,8 +10,11 @@ use nexosim::{
     simulation::Mailbox,
     time::MonotonicTime,
 };
-use prometheus_client::metrics::{counter::Counter, family::Family};
-use rand::{seq::IndexedRandom, RngCore, SeedableRng};
+use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
+use rand::{
+    seq::{IndexedRandom, IteratorRandom, SliceRandom},
+    Rng, RngCore, SeedableRng,
+};
 use rand_chacha::ChaCha12Rng;
 use rand_distr::{Distribution, Exp, Uniform};
 use sha2::Sha256;
@@ -19,13 +22,14 @@ use sha2::Sha256;
 use crate::{
     directory_entry::DirectoryEntry,
     message::{
-        DropMessage, EntryRequestMessage, LoopMessage, Message, MessageBody, UnprocessedMessage,
-        UserMessage,
+        DropMessage, EntryRequestMessage, EntryResponseMessage, LoopMessage, Message, MessageBody,
+        UnprocessedMessage, UserMessage,
     },
     poisson_generator::PoissonGenerator,
     poisson_queue::{PoissonQueue, ProtoPoissonQueue},
     prometheus::{
-        MessageBodyType, MessageForwardedLabels, MessageInitiatedLabels, MessageTerminatedLabels,
+        MessageBodyType, MessageDroppedLabels, MessageForwardedLabels, MessageInitiatedLabels,
+        MessageLatencyHistogramBuilder, MessageLatencyLabels, MessageTerminatedLabels,
         MetricFamilies,
     },
 };
@@ -34,6 +38,8 @@ pub struct Metrics {
     messages_initiated: Family<MessageInitiatedLabels, Counter>,
     messages_forwarded: Family<MessageForwardedLabels, Counter>,
     messages_terminated: Family<MessageTerminatedLabels, Counter>,
+    messages_dropped: Family<MessageDroppedLabels, Counter>,
+    message_latency: Family<MessageLatencyLabels, Histogram, MessageLatencyHistogramBuilder>,
 }
 
 pub struct ProtoUserDevice<'a> {
@@ -42,6 +48,7 @@ pub struct ProtoUserDevice<'a> {
     pub root_req: Requestor<(), RootHash<Sha256>>,
     pub entries_req: Requestor<(RootHash<Sha256>, Vec<usize>), Vec<DirectoryEntry>>,
     name: String,
+    availability: Option<f64>,
     lambda_p: Option<f64>,
     lambda_l: Option<f64>,
     lambda_d: Option<f64>,
@@ -61,6 +68,7 @@ impl<'a> ProtoUserDevice<'a> {
             root_req: Default::default(),
             entries_req: Default::default(),
             name: name.to_owned(),
+            availability: None,
             lambda_p: None,
             lambda_l: None,
             lambda_d: None,
@@ -71,6 +79,11 @@ impl<'a> ProtoUserDevice<'a> {
             rng: None,
             mf,
         }
+    }
+
+    pub fn availability(mut self, availability: f64) -> Self {
+        self.availability = Some(availability);
+        self
     }
 
     pub fn lambda_p(mut self, lambda_p: f64) -> Self {
@@ -120,9 +133,11 @@ impl<'a> ProtoModel for ProtoUserDevice<'a> {
     fn build(mut self, cx: &mut BuildContext<Self>) -> Self::Model {
         let mut ud = UserDevice::new(
             &self.name,
+            self.availability.unwrap_or(1.0),
             self.mix_directory,
             self.chain_length,
             self.lambda_mu.unwrap_or(0.0),
+            self.lambda_p.unwrap_or(0.0) == 0.0,
             self.rng.as_mut().map(ChaCha12Rng::from_rng),
             self.mf,
         );
@@ -245,6 +260,14 @@ pub struct UserDevice {
     // Per-hop Poisson parameter
     lambda_mu: f64,
 
+    // True if user messages should be sent immediately without
+    // Poisson-distributed delay
+    disable_lambda_p: bool,
+
+    // Percent of time device is available when receiving a message
+    // from server
+    availability: f64,
+
     // Name of the device
     name: String,
 
@@ -270,9 +293,11 @@ pub struct UserDevice {
 impl UserDevice {
     fn new(
         name: &str,
+        availability: f64,
         mix_directory: Vec<DirectoryEntry>,
         chain_length: usize,
         lambda_mu: f64,
+        disable_lambda_p: bool,
         rng: Option<ChaCha12Rng>,
         mf: Option<&MetricFamilies>,
     ) -> Self {
@@ -287,6 +312,8 @@ impl UserDevice {
             lambda_d: Default::default(),
             lambda_e: Default::default(),
             lambda_mu,
+            disable_lambda_p,
+            availability,
             name: name.to_owned(),
             directory_root: None,
             mix_directory,
@@ -297,13 +324,19 @@ impl UserDevice {
                 messages_initiated: mf.messages_initiated.clone(),
                 messages_forwarded: mf.messages_forwarded.clone(),
                 messages_terminated: mf.messages_terminated.clone(),
+                messages_dropped: mf.messages_dropped.clone(),
+                message_latency: mf.message_latency.clone(),
             }),
         }
     }
 
-    pub async fn user_message_in(&mut self, msg: Option<UserMessage>, _cx: &mut Context<Self>) {
+    pub async fn user_message_in(&mut self, msg: Option<UserMessage>, cx: &mut Context<Self>) {
         if let Some(msg) = msg {
-            self.queue_out.send(UnprocessedMessage::User(msg)).await;
+            if self.disable_lambda_p {
+                self.message_out(UnprocessedMessage::User(msg), cx).await;
+            } else {
+                self.queue_out.send(UnprocessedMessage::User(msg)).await;
+            }
         } else {
             panic!("UserDevice received an input from the user but it was None");
         }
@@ -318,13 +351,27 @@ impl UserDevice {
         }
         match msg.chain.pop_front() {
             Some((to, interval)) => {
-                msg.to = to;
-                if interval == 0.0 {
-                    self.message_out(UnprocessedMessage::Mix(msg), cx).await;
-                } else {
-                    let interval = Duration::from_secs_f64(interval);
-                    cx.schedule_event(interval, Self::message_out, UnprocessedMessage::Mix(msg))
+                let rand_float = self.rng.random_range(0.0..1.0);
+                if rand_float < self.availability {
+                    msg.to = to;
+                    if interval == 0.0 {
+                        self.message_out(UnprocessedMessage::Mix(msg), cx).await;
+                    } else {
+                        let interval = Duration::from_secs_f64(interval);
+                        cx.schedule_event(
+                            interval,
+                            Self::message_out,
+                            UnprocessedMessage::Mix(msg),
+                        )
                         .unwrap();
+                    }
+                } else if let Some(ref metrics) = self.metrics {
+                    metrics
+                        .messages_dropped
+                        .get_or_create(&MessageDroppedLabels {
+                            r#type: (&msg.body).into(),
+                        })
+                        .inc();
                 }
             }
             None => {
@@ -338,6 +385,12 @@ impl UserDevice {
                                     r#type: MessageBodyType::EntryRequest,
                                 })
                                 .inc();
+                            metrics
+                                .message_latency
+                                .get_or_create(&MessageLatencyLabels {
+                                    r#type: MessageBodyType::EntryRequest,
+                                })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                         let directory_root = self.get_directory_root().await.clone();
                         let entries = self
@@ -355,12 +408,11 @@ impl UserDevice {
                             if let Some((to, interval)) = surb.pop_front() {
                                 if interval == 0.0 {
                                     self.message_out(
-                                        UnprocessedMessage::Mix(Message {
+                                        UnprocessedMessage::EntryResponse(EntryResponseMessage {
                                             id,
                                             ts: cx.time(),
                                             to,
-                                            directory_root,
-                                            body: MessageBody::EntryResponse { entries },
+                                            entries,
                                             chain: surb,
                                         }),
                                         cx,
@@ -371,12 +423,11 @@ impl UserDevice {
                                     cx.schedule_event(
                                         interval,
                                         Self::message_out,
-                                        UnprocessedMessage::Mix(Message {
+                                        UnprocessedMessage::EntryResponse(EntryResponseMessage {
                                             id,
                                             ts: cx.time(),
                                             to,
-                                            directory_root,
-                                            body: MessageBody::EntryResponse { entries },
+                                            entries,
                                             chain: surb,
                                         }),
                                     )
@@ -386,7 +437,9 @@ impl UserDevice {
                                 panic!("User device received an entry request but SURB was empty");
                             }
                         } else {
-                            panic!("User device tried to get entries from the transport but received none");
+                            panic!(
+                                "User device tried to get entries from the transport but received none"
+                            );
                         }
                     }
                     MessageBody::EntryResponse { mut entries } => {
@@ -398,11 +451,37 @@ impl UserDevice {
                                     r#type: MessageBodyType::EntryResponse,
                                 })
                                 .inc();
+                            metrics
+                                .message_latency
+                                .get_or_create(&MessageLatencyLabels {
+                                    r#type: MessageBodyType::EntryResponse,
+                                })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                         entries.retain(|entry| entry.id != self.name);
-                        self.mix_directory
-                            .truncate(self.mix_directory.len() - entries.len());
-                        self.mix_directory.append(&mut entries);
+                        let current_len = self.mix_directory.len();
+                        let new_len = entries.len();
+                        if current_len == new_len {
+                            self.mix_directory = entries;
+                        } else if current_len < new_len {
+                            self.mix_directory = entries
+                                .into_iter()
+                                .choose_multiple(&mut self.rng, current_len);
+                        } else {
+                            let die = match Uniform::new(0, current_len) {
+                                Ok(die) => die,
+                                Err(e) => panic!("{}", e),
+                            };
+                            let mut taken_idxs = HashSet::<usize>::new();
+                            for entry in entries {
+                                let mut idx: usize = die.sample(&mut self.rng);
+                                while taken_idxs.contains(&idx) {
+                                    idx = die.sample(&mut self.rng);
+                                }
+                                taken_idxs.insert(idx);
+                                self.mix_directory[idx] = entry;
+                            }
+                        }
                     }
                     MessageBody::Loop => {
                         if let Some(ref metrics) = self.metrics {
@@ -413,6 +492,12 @@ impl UserDevice {
                                     r#type: MessageBodyType::Loop,
                                 })
                                 .inc();
+                            metrics
+                                .message_latency
+                                .get_or_create(&MessageLatencyLabels {
+                                    r#type: MessageBodyType::Loop,
+                                })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                         if self.loop_messages.remove(&msg.id).is_none() {
                             panic!("User device received a loop message it did not send");
@@ -427,6 +512,12 @@ impl UserDevice {
                                     r#type: MessageBodyType::String,
                                 })
                                 .inc();
+                            metrics
+                                .message_latency
+                                .get_or_create(&MessageLatencyLabels {
+                                    r#type: MessageBodyType::String,
+                                })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                     }
                     MessageBody::Drop => {
@@ -438,6 +529,12 @@ impl UserDevice {
                                     r#type: MessageBodyType::Drop,
                                 })
                                 .inc();
+                            metrics
+                                .message_latency
+                                .get_or_create(&MessageLatencyLabels {
+                                    r#type: MessageBodyType::Drop,
+                                })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                     }
                 };
@@ -462,6 +559,7 @@ impl UserDevice {
     // }
 
     pub async fn lambda_p(&mut self, lambda: f64) {
+        self.disable_lambda_p = lambda == 0.0;
         self.lambda_p.send(lambda).await;
     }
 
@@ -527,8 +625,8 @@ impl UserDevice {
                     (None, 0) => msg.to,
                     _ => {
                         panic!(
-                        "Tried to generate mixes for a user message but the mix vector was empty"
-                    );
+                            "Tried to generate mixes for a user message but the mix vector was empty"
+                        );
                     }
                 };
                 if let Some(ref metrics) = self.metrics {
@@ -577,8 +675,8 @@ impl UserDevice {
                     (None, 0) => self.name.clone(),
                     _ => {
                         panic!(
-                        "Tried to generate mixes for a loop message but the mix vector was empty"
-                    );
+                            "Tried to generate mixes for a loop message but the mix vector was empty"
+                        );
                     }
                 };
                 self.loop_messages.insert(msg.id.clone(), cx.time());
@@ -694,19 +792,22 @@ impl UserDevice {
                     Ok(die) => die,
                     Err(e) => panic!("{}", e),
                 };
-                let idxs = if 5 <= n {
-                    let taken_idxs = HashSet::<usize>::new();
+                let idxs = if 5 < n {
+                    let mut taken_idxs = HashSet::<usize>::new();
                     (0..5)
                         .map(|_| {
                             let mut sample: usize = die.sample(&mut self.rng).try_into().unwrap();
                             while taken_idxs.contains(&sample) {
                                 sample = die.sample(&mut self.rng).try_into().unwrap();
                             }
+                            taken_idxs.insert(sample);
                             sample
                         })
                         .collect()
                 } else {
-                    (0..n as usize).collect()
+                    let mut v: Vec<usize> = (0..n as usize).collect();
+                    v.shuffle(&mut self.rng);
+                    v
                 };
                 if let Some((to, _)) = mixes.pop_front() {
                     if let Some(ref metrics) = self.metrics {
@@ -735,11 +836,36 @@ impl UserDevice {
                 }
             }
             // Forward directly through
+            UnprocessedMessage::EntryResponse(msg) => {
+                if let Some(ref metrics) = self.metrics {
+                    metrics
+                        .messages_initiated
+                        .get_or_create(&MessageInitiatedLabels {
+                            from: self.name.clone(),
+                            r#type: MessageBodyType::EntryResponse,
+                        })
+                        .inc();
+                }
+                let msg = Message {
+                    id: msg.id,
+                    ts: msg.ts,
+                    to: msg.to,
+                    directory_root,
+                    body: MessageBody::EntryResponse {
+                        entries: msg.entries,
+                    },
+                    chain: msg.chain,
+                };
+                self.message_out.send(msg).await;
+            }
+            // Forward directly through
             UnprocessedMessage::Mix(msg) => {
                 if let Some(ref metrics) = self.metrics {
                     metrics
                         .messages_forwarded
-                        .get_or_create(&MessageForwardedLabels {})
+                        .get_or_create(&MessageForwardedLabels {
+                            r#type: (&msg.body).into(),
+                        })
                         .inc();
                 }
                 self.message_out.send(msg).await;

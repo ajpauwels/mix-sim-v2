@@ -1,28 +1,39 @@
+# Random seed for deterministic simulation
 seed: 0
 topology:
+  # Always set to false to reduce simulation time
   use_broadcast_server_output: false
 simulation:
-  duration: 48h
+  # Amount of time simulated
+  duration: 96h
   users:
-    count: 2
-    user_directory_size: 1
-    mix_directory_size: 2
-    chain_length: 1
-    # A value of 0 on lambda_u or lambda_p means no user messages will be sent
+    # Number of users in the simulation
+    count: 1000
+    # Size of a user's directory of other users it sends messages to
+    user_directory_size: 4
+    # Size of the directory used by a user's device to pick mix users
+    # from
+    mix_directory_size: 4
+    # Number of mixes in a message path
+    chain_length: 3
+    # Percent of time a user is available when receiving a message from the server
+    availability: 0.7
+    # A value of 0 on lambda_u means no user messages will be sent
     lambda_u: 0.002
-    lambda_p: 0.004
+    # A value of 0 on lambda_p means user messages will be sent
+    # immediately without being queued as part of Poisson-distributed
+    # traffic
+    lambda_p: 0
     # A value of 0 on lambda_l means no loop messages will be sent
     lambda_l: 0.0008
     # A value of 0 on lambda_d means no drop messages will be sent
     lambda_d: 0.0008
     # A value of 0 on lambda_e means mix directory is never refreshed
-    lambda_e: 0.003
+    lambda_e: 0.0003
     # A value of 0 on lambda_mu means messages are immediately forwarded on receipt
-    lambda_mu: 0.1
+    lambda_mu: 0.001111
 metrics:
+  # Frequency (in simulation time) with which to poll metrics
   poll_interval: 300s
+  # Path to write OpenMetrics-style metrics record
   output_path: ./metrics.out
-
-#sum(avg_over_time(rate(messages_initiated_total{from="00138adb-7ad0-46c7-8856-e2ffd2783a8c"}[1h])[3h:30m]))
-
-#sum(avg_over_time(increase(messages_initiated_total{from="b2f7f581-d6de-4c06-a822-fd6e7e8265fb"}[10m])[1h:10m]))

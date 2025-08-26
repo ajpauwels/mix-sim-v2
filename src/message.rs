@@ -33,11 +33,21 @@ pub struct EntryRequestMessage {
 }
 
 #[derive(Clone)]
+pub struct EntryResponseMessage {
+    pub id: String,
+    pub ts: MonotonicTime,
+    pub to: String,
+    pub entries: Vec<DirectoryEntry>,
+    pub chain: VecDeque<(String, f64)>,
+}
+
+#[derive(Clone)]
 pub enum UnprocessedMessage {
     User(UserMessage),
     Loop(LoopMessage),
     Drop(DropMessage),
     EntryRequest(EntryRequestMessage),
+    EntryResponse(EntryResponseMessage),
     Mix(Message),
 }
 
