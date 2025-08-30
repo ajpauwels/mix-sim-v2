@@ -5,33 +5,33 @@ topology:
   use_broadcast_server_output: false
 simulation:
   # Amount of time simulated
-  duration: 96h
+  duration: 8h
   users:
     # Number of users in the simulation
-    count: 1000
+    count: 100
     # Size of a user's directory of other users it sends messages to
-    user_directory_size: 4
+    user_directory_size: 50
     # Size of the directory used by a user's device to pick mix users
     # from
-    mix_directory_size: 4
+    mix_directory_size: 50
     # Number of mixes in a message path
     chain_length: 3
     # Percent of time a user is available when receiving a message from the server
     availability: 0.7
     # A value of 0 on lambda_u means no user messages will be sent
-    lambda_u: 0.002
+    lambda_u: 0.05
     # A value of 0 on lambda_p means user messages will be sent
     # immediately without being queued as part of Poisson-distributed
     # traffic
-    lambda_p: 0
+    lambda_p: 0.1
     # A value of 0 on lambda_l means no loop messages will be sent
     lambda_l: 0.0008
     # A value of 0 on lambda_d means no drop messages will be sent
     lambda_d: 0.0008
     # A value of 0 on lambda_e means mix directory is never refreshed
-    lambda_e: 0.0003
+    lambda_e: 0.0
     # A value of 0 on lambda_mu means messages are immediately forwarded on receipt
-    lambda_mu: 0.001111
+    lambda_mu: 0.1
 metrics:
   # Frequency (in simulation time) with which to poll metrics
   poll_interval: 300s

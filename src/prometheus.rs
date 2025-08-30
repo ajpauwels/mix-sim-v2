@@ -34,11 +34,19 @@ pub struct SimulationLambdaLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct SimulationExpectedMessageLatencyLabels {
     pub quantile: String,
+    pub r#type: MessageLatencyType,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub enum MessageLatencyType {
+    All,
+    User,
+    Cover,
+    EntryResponse,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct MessageInitiatedLabels {
-    pub from: String,
     pub r#type: MessageBodyType,
 }
 
@@ -49,7 +57,6 @@ pub struct MessageForwardedLabels {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct MessageTerminatedLabels {
-    pub by: String,
     pub r#type: MessageBodyType,
 }
 
@@ -100,7 +107,10 @@ pub struct MetricFamilies {
     pub messages_forwarded: Family<MessageForwardedLabels, Counter>,
     pub messages_terminated: Family<MessageTerminatedLabels, Counter>,
     pub messages_dropped: Family<MessageDroppedLabels, Counter>,
-    pub message_latency: Family<MessageLatencyLabels, Histogram, MessageLatencyHistogramBuilder>,
+    pub message_latency_all:
+        Family<MessageLatencyLabels, Histogram, MessageLatencyHistogramBuilder>,
+    pub message_latency_user: Family<NoLabels, Histogram, MessageLatencyHistogramBuilder>,
+    pub message_latency_cover: Family<NoLabels, Histogram, MessageLatencyHistogramBuilder>,
     pub simulation_lambdas: Family<SimulationLambdaLabels, Gauge<f64, AtomicU64>>,
     pub simulation_time: Family<NoLabels, Gauge<u64, AtomicU64>>,
     pub simulation_user_count: Family<NoLabels, Gauge<u64, AtomicU64>>,
@@ -112,34 +122,49 @@ pub struct MetricFamilies {
         Family<SimulationExpectedMessageLatencyLabels, Gauge<f64, AtomicU64>>,
 }
 
-pub fn setup(quantiles: Vec<(f64, f64)>) -> (Registry, MetricFamilies) {
+pub fn setup(
+    quantiles_all: Vec<(f64, f64)>,
+    quantiles_user: Vec<(f64, f64)>,
+    quantiles_cover: Vec<(f64, f64)>,
+) -> (Registry, MetricFamilies) {
     let mut registry = <Registry>::default();
 
-    let mf =
-        MetricFamilies {
-            messages_initiated: Family::<MessageInitiatedLabels, Counter>::default(),
-            messages_forwarded: Family::<MessageForwardedLabels, Counter>::default(),
-            messages_terminated: Family::<MessageTerminatedLabels, Counter>::default(),
-            messages_dropped: Family::<MessageDroppedLabels, Counter>::default(),
-            message_latency: Family::<
-                MessageLatencyLabels,
-                Histogram,
-                MessageLatencyHistogramBuilder,
-            >::new_with_constructor(MessageLatencyHistogramBuilder {
-                quantiles: quantiles.into_iter().map(|(_, v)| v).collect(),
-            }),
-            simulation_lambdas: Family::<SimulationLambdaLabels, Gauge<f64, AtomicU64>>::default(),
-            simulation_time: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
-            simulation_user_count: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
-            simulation_user_directory_size: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
-            simulation_mix_directory_size: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
-            simulation_chain_length: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
-            simulation_user_availability: Family::<NoLabels, Gauge<f64, AtomicU64>>::default(),
-            simulation_expected_message_latency: Family::<
-                SimulationExpectedMessageLatencyLabels,
-                Gauge<f64, AtomicU64>,
-            >::default(),
-        };
+    let mf = MetricFamilies {
+        messages_initiated: Family::<MessageInitiatedLabels, Counter>::default(),
+        messages_forwarded: Family::<MessageForwardedLabels, Counter>::default(),
+        messages_terminated: Family::<MessageTerminatedLabels, Counter>::default(),
+        messages_dropped: Family::<MessageDroppedLabels, Counter>::default(),
+        message_latency_all: Family::<
+            MessageLatencyLabels,
+            Histogram,
+            MessageLatencyHistogramBuilder,
+        >::new_with_constructor(MessageLatencyHistogramBuilder {
+            quantiles: quantiles_all.into_iter().map(|(_, v)| v).collect(),
+        }),
+        message_latency_user:
+            Family::<NoLabels, Histogram, MessageLatencyHistogramBuilder>::new_with_constructor(
+                MessageLatencyHistogramBuilder {
+                    quantiles: quantiles_user.into_iter().map(|(_, v)| v).collect(),
+                },
+            ),
+        message_latency_cover:
+            Family::<NoLabels, Histogram, MessageLatencyHistogramBuilder>::new_with_constructor(
+                MessageLatencyHistogramBuilder {
+                    quantiles: quantiles_cover.into_iter().map(|(_, v)| v).collect(),
+                },
+            ),
+        simulation_lambdas: Family::<SimulationLambdaLabels, Gauge<f64, AtomicU64>>::default(),
+        simulation_time: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+        simulation_user_count: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+        simulation_user_directory_size: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+        simulation_mix_directory_size: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+        simulation_chain_length: Family::<NoLabels, Gauge<u64, AtomicU64>>::default(),
+        simulation_user_availability: Family::<NoLabels, Gauge<f64, AtomicU64>>::default(),
+        simulation_expected_message_latency: Family::<
+            SimulationExpectedMessageLatencyLabels,
+            Gauge<f64, AtomicU64>,
+        >::default(),
+    };
 
     registry.register(
         "messages_initiated",
@@ -162,9 +187,19 @@ pub fn setup(quantiles: Vec<(f64, f64)>) -> (Registry, MetricFamilies) {
         mf.messages_dropped.clone(),
     );
     registry.register(
-        "message_latency",
+        "message_latency_all",
         "Number of seconds it took for an initiated message to be terminated",
-        mf.message_latency.clone(),
+        mf.message_latency_all.clone(),
+    );
+    registry.register(
+        "message_latency_user",
+        "Number of seconds it took for an initiated user message to be terminated",
+        mf.message_latency_user.clone(),
+    );
+    registry.register(
+        "message_latency_cover",
+        "Number of seconds it took for an initiated cover message to be terminated",
+        mf.message_latency_cover.clone(),
     );
     registry.register(
         "simulation_lambdas",

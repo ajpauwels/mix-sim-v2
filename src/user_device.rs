@@ -30,7 +30,7 @@ use crate::{
     prometheus::{
         MessageBodyType, MessageDroppedLabels, MessageForwardedLabels, MessageInitiatedLabels,
         MessageLatencyHistogramBuilder, MessageLatencyLabels, MessageTerminatedLabels,
-        MetricFamilies,
+        MetricFamilies, NoLabels,
     },
 };
 
@@ -39,7 +39,9 @@ pub struct Metrics {
     messages_forwarded: Family<MessageForwardedLabels, Counter>,
     messages_terminated: Family<MessageTerminatedLabels, Counter>,
     messages_dropped: Family<MessageDroppedLabels, Counter>,
-    message_latency: Family<MessageLatencyLabels, Histogram, MessageLatencyHistogramBuilder>,
+    message_latency_all: Family<MessageLatencyLabels, Histogram, MessageLatencyHistogramBuilder>,
+    message_latency_user: Family<NoLabels, Histogram, MessageLatencyHistogramBuilder>,
+    message_latency_cover: Family<NoLabels, Histogram, MessageLatencyHistogramBuilder>,
 }
 
 pub struct ProtoUserDevice<'a> {
@@ -325,20 +327,18 @@ impl UserDevice {
                 messages_forwarded: mf.messages_forwarded.clone(),
                 messages_terminated: mf.messages_terminated.clone(),
                 messages_dropped: mf.messages_dropped.clone(),
-                message_latency: mf.message_latency.clone(),
+                message_latency_all: mf.message_latency_all.clone(),
+                message_latency_user: mf.message_latency_user.clone(),
+                message_latency_cover: mf.message_latency_cover.clone(),
             }),
         }
     }
 
-    pub async fn user_message_in(&mut self, msg: Option<UserMessage>, cx: &mut Context<Self>) {
-        if let Some(msg) = msg {
-            if self.disable_lambda_p {
-                self.message_out(UnprocessedMessage::User(msg), cx).await;
-            } else {
-                self.queue_out.send(UnprocessedMessage::User(msg)).await;
-            }
+    pub async fn user_message_in(&mut self, msg: UserMessage, cx: &mut Context<Self>) {
+        if self.disable_lambda_p {
+            self.message_out(UnprocessedMessage::User(msg), cx).await;
         } else {
-            panic!("UserDevice received an input from the user but it was None");
+            self.queue_out.send(UnprocessedMessage::User(msg)).await;
         }
     }
 
@@ -381,12 +381,11 @@ impl UserDevice {
                             metrics
                                 .messages_terminated
                                 .get_or_create(&MessageTerminatedLabels {
-                                    by: self.name.clone(),
                                     r#type: MessageBodyType::EntryRequest,
                                 })
                                 .inc();
                             metrics
-                                .message_latency
+                                .message_latency_all
                                 .get_or_create(&MessageLatencyLabels {
                                     r#type: MessageBodyType::EntryRequest,
                                 })
@@ -447,12 +446,11 @@ impl UserDevice {
                             metrics
                                 .messages_terminated
                                 .get_or_create(&MessageTerminatedLabels {
-                                    by: self.name.clone(),
                                     r#type: MessageBodyType::EntryResponse,
                                 })
                                 .inc();
                             metrics
-                                .message_latency
+                                .message_latency_all
                                 .get_or_create(&MessageLatencyLabels {
                                     r#type: MessageBodyType::EntryResponse,
                                 })
@@ -488,15 +486,18 @@ impl UserDevice {
                             metrics
                                 .messages_terminated
                                 .get_or_create(&MessageTerminatedLabels {
-                                    by: self.name.clone(),
                                     r#type: MessageBodyType::Loop,
                                 })
                                 .inc();
                             metrics
-                                .message_latency
+                                .message_latency_all
                                 .get_or_create(&MessageLatencyLabels {
                                     r#type: MessageBodyType::Loop,
                                 })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
+                            metrics
+                                .message_latency_cover
+                                .get_or_create(&NoLabels {})
                                 .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                         if self.loop_messages.remove(&msg.id).is_none() {
@@ -508,15 +509,18 @@ impl UserDevice {
                             metrics
                                 .messages_terminated
                                 .get_or_create(&MessageTerminatedLabels {
-                                    by: self.name.clone(),
                                     r#type: MessageBodyType::String,
                                 })
                                 .inc();
                             metrics
-                                .message_latency
+                                .message_latency_all
                                 .get_or_create(&MessageLatencyLabels {
                                     r#type: MessageBodyType::String,
                                 })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
+                            metrics
+                                .message_latency_user
+                                .get_or_create(&NoLabels {})
                                 .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                     }
@@ -525,15 +529,18 @@ impl UserDevice {
                             metrics
                                 .messages_terminated
                                 .get_or_create(&MessageTerminatedLabels {
-                                    by: self.name.clone(),
                                     r#type: MessageBodyType::Drop,
                                 })
                                 .inc();
                             metrics
-                                .message_latency
+                                .message_latency_all
                                 .get_or_create(&MessageLatencyLabels {
                                     r#type: MessageBodyType::Drop,
                                 })
+                                .observe(cx.time().duration_since(msg.ts).as_secs_f64());
+                            metrics
+                                .message_latency_cover
+                                .get_or_create(&NoLabels {})
                                 .observe(cx.time().duration_since(msg.ts).as_secs_f64());
                         }
                     }
@@ -633,7 +640,6 @@ impl UserDevice {
                     metrics
                         .messages_initiated
                         .get_or_create(&MessageInitiatedLabels {
-                            from: self.name.clone(),
                             r#type: MessageBodyType::String,
                         })
                         .inc();
@@ -684,7 +690,6 @@ impl UserDevice {
                     metrics
                         .messages_initiated
                         .get_or_create(&MessageInitiatedLabels {
-                            from: self.name.clone(),
                             r#type: MessageBodyType::Loop,
                         })
                         .inc();
@@ -723,7 +728,6 @@ impl UserDevice {
                         metrics
                             .messages_initiated
                             .get_or_create(&MessageInitiatedLabels {
-                                from: self.name.clone(),
                                 r#type: MessageBodyType::Drop,
                             })
                             .inc();
@@ -814,7 +818,6 @@ impl UserDevice {
                         metrics
                             .messages_initiated
                             .get_or_create(&MessageInitiatedLabels {
-                                from: self.name.clone(),
                                 r#type: MessageBodyType::EntryRequest,
                             })
                             .inc();
@@ -841,7 +844,6 @@ impl UserDevice {
                     metrics
                         .messages_initiated
                         .get_or_create(&MessageInitiatedLabels {
-                            from: self.name.clone(),
                             r#type: MessageBodyType::EntryResponse,
                         })
                         .inc();

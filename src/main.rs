@@ -5,7 +5,7 @@ use std::{
 
 use config::{load_config, Config};
 use directory_entry::DirectoryEntry;
-use erlang::erlang_inverse_cdf;
+use distribution::inverse_cdf;
 use message::Message;
 use nexosim::{
     ports::{EventSource, Output},
@@ -13,8 +13,8 @@ use nexosim::{
     time::MonotonicTime,
 };
 use prometheus::{
-    MetricFamilies, MetricsServer, NoLabels, SimulationExpectedMessageLatencyLabels,
-    SimulationLambdaLabels,
+    MessageLatencyType, MetricFamilies, MetricsServer, NoLabels,
+    SimulationExpectedMessageLatencyLabels, SimulationLambdaLabels,
 };
 use prometheus_client::registry::Registry;
 use rand::{seq::IteratorRandom, RngCore, SeedableRng};
@@ -24,7 +24,7 @@ use user_with_device::{ProtoUserWithDevice, UserWithDevice};
 
 mod config;
 mod directory_entry;
-mod erlang;
+mod distribution;
 mod message;
 mod poisson_generator;
 mod poisson_queue;
@@ -44,17 +44,76 @@ async fn main() -> Result<(), SimulationError> {
     let config_env_prefix = "APPCFG";
     let config = load_config(config_path, config_env_prefix).unwrap();
 
+    // Config sanity checks
+    let lambda_u = config.simulation.users.lambda_u;
+    let lambda_p = config.simulation.users.lambda_p;
+    if lambda_p > 0.0 && lambda_u / lambda_p >= 1.0 {
+        panic!("lambda_u / lambda_p >= 1, unstable configuration detected");
+    }
+
     // Compute message latency quantiles
-    let k: i32 = config.simulation.users.chain_length.try_into().unwrap();
-    let lambda = config.simulation.users.lambda_mu;
-    let quantiles = vec![0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 0.99]
+    let k: u64 = config
+        .simulation
+        .users
+        .chain_length
+        .try_into()
+        .expect("Could not coerce usize into a u64");
+    let lambda_u = config.simulation.users.lambda_u;
+    let lambda_p = config.simulation.users.lambda_p;
+    let lambda_l = config.simulation.users.lambda_l;
+    let lambda_d = config.simulation.users.lambda_d;
+    let lambda_mu = config.simulation.users.lambda_mu;
+    let exp_lambda = if lambda_p == 0.0 {
+        None
+    } else {
+        Some(lambda_p - lambda_u)
+    };
+    let mix_proportion = if lambda_p == 0.0 {
+        None
+    } else {
+        Some(lambda_u / (lambda_p + lambda_l + lambda_d))
+    };
+    let quantiles_all = vec![0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 0.99]
         .into_iter()
-        .map(|q| (q, round(erlang_inverse_cdf(k, lambda, q).unwrap()[0], 3)))
+        .map(|q| {
+            (
+                q,
+                round(
+                    inverse_cdf(exp_lambda, lambda_mu, k, q, mix_proportion).unwrap()[0],
+                    3,
+                ),
+            )
+        })
+        .collect::<Vec<(f64, f64)>>();
+    let quantiles_user = vec![0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 0.99]
+        .into_iter()
+        .map(|q| {
+            (
+                q,
+                round(
+                    inverse_cdf(exp_lambda, lambda_mu, k, q, None).unwrap()[0],
+                    3,
+                ),
+            )
+        })
+        .collect::<Vec<(f64, f64)>>();
+    let quantiles_cover = vec![0.01, 0.05, 0.2, 0.5, 0.8, 0.95, 0.99]
+        .into_iter()
+        .map(|q| {
+            (
+                q,
+                round(inverse_cdf(None, lambda_mu, k, q, None).unwrap()[0], 3),
+            )
+        })
         .collect::<Vec<(f64, f64)>>();
 
     // Turn on metrics if enabled
     let (metric_registry, metric_families) = if config.metrics.poll_interval.is_some() {
-        Some(prometheus::setup(quantiles.clone()))
+        Some(prometheus::setup(
+            quantiles_all.clone(),
+            quantiles_user.clone(),
+            quantiles_cover.clone(),
+        ))
     } else {
         None
     }
@@ -133,10 +192,27 @@ async fn main() -> Result<(), SimulationError> {
             .set(user_availability);
 
         // Set quantiles gauge for capturing message latency histogram
-        quantiles.iter().for_each(|(q, v)| {
+        quantiles_all.iter().for_each(|(q, v)| {
             mf.simulation_expected_message_latency
                 .get_or_create(&SimulationExpectedMessageLatencyLabels {
                     quantile: q.to_string(),
+                    r#type: MessageLatencyType::All,
+                })
+                .set(*v);
+        });
+        quantiles_user.iter().for_each(|(q, v)| {
+            mf.simulation_expected_message_latency
+                .get_or_create(&SimulationExpectedMessageLatencyLabels {
+                    quantile: q.to_string(),
+                    r#type: MessageLatencyType::User,
+                })
+                .set(*v);
+        });
+        quantiles_cover.iter().for_each(|(q, v)| {
+            mf.simulation_expected_message_latency
+                .get_or_create(&SimulationExpectedMessageLatencyLabels {
+                    quantile: q.to_string(),
+                    r#type: MessageLatencyType::Cover,
                 })
                 .set(*v);
         });

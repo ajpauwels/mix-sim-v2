@@ -126,7 +126,7 @@ impl<'a> ProtoModel for ProtoUserWithDevice<'a> {
         let mut user = PoissonGenerator::new(
             self.lambda_u.unwrap_or(0.0),
             move |name, ts, rng| {
-                self.user_directory.choose(rng).map(|to| {
+                if let Some(to) = self.user_directory.choose(rng) {
                     let mut uuid_bytes = [0u8; 16];
                     rng.fill_bytes(&mut uuid_bytes);
                     let id = uuid::Builder::from_random_bytes(uuid_bytes)
@@ -140,7 +140,9 @@ impl<'a> ProtoModel for ProtoUserWithDevice<'a> {
                         to: to.id.clone(),
                         body: name.to_owned(),
                     }
-                })
+                } else {
+                    panic!("User tried to send a message but its user directory was empty");
+                }
             },
             self.rng.as_mut().map(ChaCha12Rng::from_rng),
         );
